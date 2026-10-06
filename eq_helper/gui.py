@@ -42,6 +42,7 @@ class ItemsTab(ttk.Frame):
         self._character_filters: dict[str, tuple[str, str]] = {}
         self._build()
         self._refresh_filter_choices()
+        self._refresh_tag_suggestions()
         self.refresh()
 
     def _build(self):
@@ -52,9 +53,23 @@ class ItemsTab(ttk.Frame):
 
         ttk.Label(filters, text="Search:").grid(row=0, column=0, sticky="w")
         self.search_var = tk.StringVar()
-        search_entry = ttk.Entry(filters, textvariable=self.search_var)
-        search_entry.grid(row=0, column=1, sticky="ew", padx=(4, 12))
-        search_entry.bind("<KeyRelease>", lambda _event: self.refresh())
+        search_controls = ttk.Frame(filters)
+        search_controls.grid(row=0, column=1, sticky="ew", padx=(4, 12))
+        search_controls.columnconfigure(0, weight=1)
+        self.search_entry = ttk.Combobox(
+            search_controls, textvariable=self.search_var, state="normal",
+        )
+        self.search_entry.grid(row=0, column=0, sticky="ew")
+        self.search_entry.bind("<KeyRelease>", lambda _event: self.refresh())
+        self.search_entry.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Label(search_controls, text="Match:").grid(row=0, column=1, padx=(8, 4))
+        self.tag_match_var = tk.StringVar(value="Any term")
+        self.tag_match_filter = ttk.Combobox(
+            search_controls, textvariable=self.tag_match_var,
+            values=("Any term", "All terms"), state="readonly", width=10,
+        )
+        self.tag_match_filter.grid(row=0, column=2, sticky="e")
+        self.tag_match_filter.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
 
         ttk.Label(filters, text="Item type:").grid(row=0, column=2, sticky="w")
         self.tradeskill_var = tk.StringVar(value="All items")
@@ -172,12 +187,13 @@ class ItemsTab(ttk.Frame):
             "Tradeskill only": "tradeskill",
             "Non-tradeskill only": "non-tradeskill",
         }.get(self.tradeskill_var.get(), "all")
+        tag_match = "all" if self.tag_match_var.get() == "All terms" else "any"
         previous_item_id = self.selected_item_id
         for row in self.tree.get_children():
             self.tree.delete(row)
         visible_item_ids = set()
         for row in db.list_workbench_items(
-            self.search_var.get(), filter_mode, server, character,
+            self.search_var.get(), filter_mode, server, character, tag_match,
         ):
             iid = str(row["id"])
             visible_item_ids.add(row["id"])
@@ -196,6 +212,15 @@ class ItemsTab(ttk.Frame):
             self._show_item(previous_item_id)
         else:
             self._clear_form()
+
+    def _refresh_tag_suggestions(self):
+        pinned_tags = ("Pelts", "Ores", "Silk")
+        pinned_keys = {tag.casefold() for tag in pinned_tags}
+        other_tags = sorted(
+            (tag for tag in db.list_all_tags() if tag.casefold() not in pinned_keys),
+            key=str.casefold,
+        )
+        self.search_entry["values"] = (*pinned_tags, *other_tags)
 
     def _on_tree_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -272,6 +297,7 @@ class ItemsTab(ttk.Frame):
 
     def _clear_filters(self):
         self.search_var.set("")
+        self.tag_match_var.set("Any term")
         self.tradeskill_var.set("All items")
         self.server_var.set("All servers")
         self.character_var.set("All characters")
@@ -296,6 +322,7 @@ class ItemsTab(ttk.Frame):
         tag_names = [t.strip() for t in self.tags_var.get().split(",") if t.strip()]
         db.set_item_tags(self.selected_item_id, tag_names)
 
+        self._refresh_tag_suggestions()
         self.refresh()
 
     def _delete(self):

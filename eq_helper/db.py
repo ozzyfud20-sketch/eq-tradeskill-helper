@@ -134,16 +134,36 @@ def list_workbench_items(
     tradeskill_filter: str = "all",
     server: str = "",
     character: str = "",
+    tag_match: str = "any",
 ) -> list[sqlite3.Row]:
-    """Return unique items matching the search, tradeskill, and inventory filters."""
+    """Return unique items matching text/tags, tradeskill, and inventory filters."""
     conn = get_connection()
     try:
         conditions = []
         parameters: list[str] = []
-        if query.strip():
-            like = f"%{query.strip()}%"
-            conditions.append("(items.name LIKE ? OR CAST(items.eq_item_id AS TEXT) LIKE ?)")
-            parameters.extend((like, like))
+        if tag_match not in {"any", "all"}:
+            raise ValueError(f"Unknown tag match mode: {tag_match}")
+
+        search_terms = [term.strip() for term in query.split(",") if term.strip()]
+        if search_terms:
+            term_conditions = []
+            for term in search_terms:
+                like = f"%{term}%"
+                term_conditions.append(
+                    """(
+                        items.name LIKE ?
+                        OR CAST(items.eq_item_id AS TEXT) LIKE ?
+                        OR EXISTS (
+                            SELECT 1
+                            FROM item_tags
+                            JOIN tags ON tags.id = item_tags.tag_id
+                            WHERE item_tags.item_id = items.id AND tags.name LIKE ?
+                        )
+                    )"""
+                )
+                parameters.extend((like, like, like))
+            operator = " OR " if tag_match == "any" else " AND "
+            conditions.append("(" + operator.join(term_conditions) + ")")
 
         if tradeskill_filter == "tradeskill":
             conditions.append("items.tradeskill_flagged = 1")
