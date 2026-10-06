@@ -135,12 +135,30 @@ def list_workbench_items(
     server: str = "",
     character: str = "",
     tag_match: str = "any",
+    exact_tag: str = "",
 ) -> list[sqlite3.Row]:
-    """Return unique items matching text/tags, tradeskill, and inventory filters."""
+    """Return unique items matching text, exact tag, tradeskill, and inventory filters."""
     conn = get_connection()
     try:
         conditions = []
         parameters: list[str] = []
+        quantity_conditions = ["item_locations.item_id = items.id"]
+        quantity_parameters: list[str] = []
+        quantity_character_join = ""
+        if server or character:
+            quantity_character_join = """
+                JOIN characters ON substr(
+                    locations.name, 1,
+                    length(characters.name || ' (' || characters.server || ') - ')
+                ) = characters.name || ' (' || characters.server || ') - '
+            """
+            if server:
+                quantity_conditions.append("characters.server = ?")
+                quantity_parameters.append(server)
+            if character:
+                quantity_conditions.append("characters.name = ?")
+                quantity_parameters.append(character)
+
         if tag_match not in {"any", "all"}:
             raise ValueError(f"Unknown tag match mode: {tag_match}")
 
@@ -164,6 +182,17 @@ def list_workbench_items(
                 parameters.extend((like, like, like))
             operator = " OR " if tag_match == "any" else " AND "
             conditions.append("(" + operator.join(term_conditions) + ")")
+
+        if exact_tag:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1
+                    FROM item_tags
+                    JOIN tags ON tags.id = item_tags.tag_id
+                    WHERE item_tags.item_id = items.id AND tags.name = ? COLLATE NOCASE
+                )"""
+            )
+            parameters.append(exact_tag)
 
         if tradeskill_filter == "tradeskill":
             conditions.append("items.tradeskill_flagged = 1")
@@ -192,11 +221,19 @@ def list_workbench_items(
                     WHERE """ + " AND ".join(location_conditions) + ")"
             )
 
-        sql = "SELECT items.* FROM items"
+        quantity_expression = (
+            "COALESCE((SELECT SUM(item_locations.quantity) "
+            "FROM item_locations "
+            "JOIN locations ON locations.id = item_locations.location_id "
+            f"{quantity_character_join} "
+            "WHERE " + " AND ".join(quantity_conditions) +
+            "), 0) AS total_quantity"
+        )
+        sql = f"SELECT items.*, {quantity_expression} FROM items"
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY items.name COLLATE NOCASE"
-        return conn.execute(sql, parameters).fetchall()
+        return conn.execute(sql, quantity_parameters + parameters).fetchall()
     finally:
         conn.close()
 
