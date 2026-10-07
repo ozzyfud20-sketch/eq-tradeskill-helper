@@ -1,5 +1,6 @@
 """Tkinter UI for the EQ Tradeskill Helper."""
 import os
+import re
 import tkinter as tk
 from datetime import datetime, timezone
 from tkinter import ttk, messagebox, filedialog
@@ -636,6 +637,135 @@ class CharactersTab(ttk.Frame):
         return "stale", str(days), "Stale"
 
 
+class CommonTradeItemsDialog(tk.Toplevel):
+    """Review items whose names look like Pelt/Ore/Silk and tag the ones the user confirms."""
+
+    PATTERNS = {
+        "Pelt": re.compile(r"\bpelts?\b", re.IGNORECASE),
+        "Ore": re.compile(r"\bores?\b", re.IGNORECASE),
+        "Silk": re.compile(r"\bsilks?\b", re.IGNORECASE),
+    }
+
+    def __init__(self, parent, on_done=None):
+        super().__init__(parent)
+        self.title("Find common trade items")
+        self.geometry("700x520")
+        self.configure(bg=ttk.Style(self).lookup("TFrame", "background") or self.cget("bg"))
+        self.on_done = on_done
+        self._candidates: list[tuple[int, str, str]] = []
+        self._unchecked: set[tuple[int, str]] = set()
+        self.ignore_var = tk.StringVar(value="defiant")
+        self.status_var = tk.StringVar()
+        self._build()
+        self._load_candidates()
+        self._rebuild()
+
+    def _build(self):
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(top, text="Hide names containing (comma separated):").pack(side="left")
+        entry = ttk.Entry(top, textvariable=self.ignore_var)
+        entry.pack(side="left", fill="x", expand=True, padx=4)
+        entry.bind("<KeyRelease>", lambda _e: self._rebuild())
+
+        ttk.Label(
+            self, text="Click the first column to untick items that are not trade items."
+        ).pack(anchor="w", padx=8)
+
+        frame = ttk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(
+            frame, columns=("use", "tag", "name"), show="headings", selectmode="none"
+        )
+        _make_sortable(self.tree, {"use": "Add", "tag": "Tag", "name": "Item"})
+        self.tree.column("use", width=60, anchor="center", stretch=False)
+        self.tree.column("tag", width=80, stretch=False)
+        self.tree.column("name", width=400)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.bind("<Button-1>", self._on_click)
+
+        ttk.Label(self, textvariable=self.status_var).pack(anchor="w", padx=8)
+        buttons = ttk.Frame(self)
+        buttons.pack(fill="x", padx=8, pady=8)
+        ttk.Button(buttons, text="Tick all", command=lambda: self._set_all(True)).pack(side="left")
+        ttk.Button(buttons, text="Untick all", command=lambda: self._set_all(False)).pack(
+            side="left", padx=4
+        )
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Tag and mark as tradeskill", command=self._apply).pack(
+            side="right", padx=4
+        )
+
+    def _load_candidates(self):
+        self._candidates = []
+        for row in db.list_workbench_items():
+            matches = [tag for tag, pat in self.PATTERNS.items() if pat.search(row["name"])]
+            if not matches:
+                continue
+            have = {t.casefold() for t in db.get_item_tags(row["id"])}
+            for tag in matches:
+                if tag.casefold() not in have:
+                    self._candidates.append((row["id"], tag, row["name"]))
+        self._candidates.sort(key=lambda c: (c[1], c[2].casefold()))
+
+    def _visible(self) -> list[tuple[int, str, str]]:
+        ignored = [w.strip().casefold() for w in self.ignore_var.get().split(",") if w.strip()]
+        return [
+            c for c in self._candidates
+            if not any(word in c[2].casefold() for word in ignored)
+        ]
+
+    def _rebuild(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        visible = self._visible()
+        for item_id, tag, name in visible:
+            mark = "\u2610" if (item_id, tag) in self._unchecked else "\u2611"
+            self.tree.insert("", "end", iid=f"{item_id}|{tag}", values=(mark, tag, name))
+        self.status_var.set(f"{len(visible)} possible item(s) shown.")
+
+    def _on_click(self, event):
+        if self.tree.identify("region", event.x, event.y) != "cell":
+            return
+        row = self.tree.identify_row(event.y)
+        if not row or self.tree.identify_column(event.x) != "#1":
+            return
+        item_id, tag = row.split("|", 1)
+        key = (int(item_id), tag)
+        self._unchecked.symmetric_difference_update({key})
+        self.tree.set(row, "use", "\u2610" if key in self._unchecked else "\u2611")
+
+    def _set_all(self, checked: bool):
+        for item_id, tag, _name in self._visible():
+            if checked:
+                self._unchecked.discard((item_id, tag))
+            else:
+                self._unchecked.add((item_id, tag))
+        self._rebuild()
+
+    def _apply(self):
+        count = 0
+        for item_id, tag, _name in self._visible():
+            if (item_id, tag) not in self._unchecked:
+                db.add_item_tag(item_id, tag)
+                item = db.get_item(item_id)
+                if item and not item["tradeskill_flagged"]:
+                    db.update_item(
+                        item_id, item["name"], item["eq_item_id"], item["notes"] or "", True
+                    )
+                count += 1
+        if self.on_done:
+            self.on_done()
+        self._load_candidates()
+        self._rebuild()
+        self.status_var.set(f"Added {count} tag(s). {len(self._visible())} possible item(s) left.")
+
+
 class ImportTab(ttk.Frame):
     """Imports items/quantities from an EverQuest /outputfile inventory export."""
 
@@ -703,6 +833,9 @@ class ImportTab(ttk.Frame):
             btn_frame, text="Import", command=self._import_now, state="disabled"
         )
         self.import_button.pack(side="left", padx=(4, 0))
+        ttk.Button(
+            btn_frame, text="Find common trade items...", command=self._open_trade_items
+        ).pack(side="left", padx=(12, 0))
 
         ttk.Label(self, textvariable=self.status_var, wraplength=1050, anchor="w").pack(
             fill="x", padx=8, pady=(2, 4)
@@ -726,6 +859,9 @@ class ImportTab(ttk.Frame):
         self.new_items_tree.tag_configure("tradeskill", foreground="#1a7f37")
         self.new_items_tree.bind("<Button-1>", self._on_new_items_click)
         self.new_items_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _open_trade_items(self):
+        CommonTradeItemsDialog(self, on_done=self.on_items_changed)
 
     def _on_lookup_inputs_changed(self, *_args):
         self.path_var.set("")
@@ -882,6 +1018,14 @@ class App(tk.Tk):
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.minsize(min(900, width), min(650, height))
 
+        self._light_theme = ttk.Style(self).theme_use()
+        self.dark_var = tk.BooleanVar(value=False)
+        top_bar = ttk.Frame(self)
+        top_bar.pack(fill="x")
+        ttk.Checkbutton(
+            top_bar, text="Dark mode", variable=self.dark_var, command=self._apply_theme,
+        ).pack(side="right", padx=8, pady=(4, 0))
+
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True)
 
@@ -900,6 +1044,49 @@ class App(tk.Tk):
         notebook.add(recipes_tab, text="Recipes")
         notebook.add(characters_tab, text="Characters")
         notebook.add(import_tab, text="Import")
+
+    def _apply_theme(self):
+        dark = self.dark_var.get()
+        style = ttk.Style(self)
+        tag_colors = {"#1a7f37": "#3fb950", "#9a6700": "#d29922", "#6e7781": "#8b949e"}
+        if not dark:
+            tag_colors = {v: k for k, v in tag_colors.items()}
+            style.theme_use(self._light_theme)
+            bg, fg, field, select = "SystemButtonFace", "black", "white", "#0078d7"
+        else:
+            bg, fg, field, select = "#1e1e1e", "#e6e6e6", "#2b2b2b", "#3a5f8f"
+            style.theme_use("clam")
+            style.configure(".", background=bg, foreground=fg, fieldbackground=field,
+                            bordercolor="#3c3c3c", lightcolor=bg, darkcolor=bg)
+            style.configure("Treeview", background=field, fieldbackground=field, foreground=fg)
+            style.configure("Treeview.Heading", background="#333333", foreground=fg)
+            style.configure("TButton", background="#333333")
+            style.configure("TNotebook.Tab", background="#2b2b2b", foreground=fg)
+            style.map("TNotebook.Tab", background=[("selected", "#3a3a3a")])
+            style.map("Treeview", background=[("selected", select)],
+                      foreground=[("selected", "white")])
+            style.map("TCombobox", fieldbackground=[("readonly", field)],
+                      foreground=[("readonly", fg)])
+        self.configure(bg=bg)
+        self.option_add("*TCombobox*Listbox.background", field)
+        self.option_add("*TCombobox*Listbox.foreground", fg)
+        self.option_add("*TCombobox*Listbox.selectBackground", select)
+        self._restyle_widgets(self, dark, field, fg, tag_colors)
+
+    def _restyle_widgets(self, widget, dark, field, fg, tag_colors):
+        for child in widget.winfo_children():
+            if isinstance(child, tk.Text):
+                child.configure(
+                    background=field if dark else "white",
+                    foreground=fg,
+                    insertbackground=fg,
+                )
+            elif isinstance(child, ttk.Treeview):
+                for tag in ("tradeskill", "fresh", "aging", "stale", "never"):
+                    current = str(child.tag_configure(tag, "foreground")).lower()
+                    if current in tag_colors:
+                        child.tag_configure(tag, foreground=tag_colors[current])
+            self._restyle_widgets(child, dark, field, fg, tag_colors)
 
 
 def run():

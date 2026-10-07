@@ -354,6 +354,25 @@ def get_item_tags(item_id: int) -> list[str]:
         conn.close()
 
 
+def add_item_tag(item_id: int, tag_name: str) -> None:
+    """Add one tag to an item, keeping its existing tags."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id FROM tags WHERE name=? COLLATE NOCASE", (tag_name,)
+        ).fetchone()
+        tag_id = row["id"] if row else conn.execute(
+            "INSERT INTO tags (name) VALUES (?)", (tag_name,)
+        ).lastrowid
+        conn.execute(
+            "INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)",
+            (item_id, tag_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def list_all_tags() -> list[str]:
     conn = get_connection()
     try:
